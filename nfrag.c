@@ -8,9 +8,12 @@
 #include <netinet/in.h>
 #include <linux/netfilter.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
+#include <linux/ip.h>
 #include <getopt.h>
 
 #define BUFSIZE 9000
+
+#define IP_MF 0x2000
 
 struct config {
     unsigned char   *filter_keyword;  // Keyword to filter on
@@ -18,7 +21,94 @@ struct config {
 
     unsigned char   replace;
     int             ttl;
+
+    int             rawsock;
 };
+
+uint16_t csum(uint16_t *buf, int nwords, uint32_t init_sum)
+{
+    uint32_t sum;
+
+    for (sum=init_sum; nwords>0; nwords--) {
+        sum += ntohs(*buf++);
+    }
+    sum = (sum >> 16) + (sum & 0xffff);
+    sum += (sum >> 16);
+    return (uint16_t)(~sum);
+}
+
+void ip_checksum(struct iphdr *ip)
+{
+    ip->check = htons(csum((uint16_t *)ip, ip->ihl*2, 0));
+}
+
+int fragment_packet(struct iphdr *ip, int frag_offset, int len, struct config *conf)
+{
+    int iphdr_len = ip->ihl*4;
+    unsigned char *data = &((unsigned char *)ip)[iphdr_len];
+    int data_len = len - iphdr_len;
+    if (data_len < 0) {
+        return -1;
+    }
+
+
+    int data_frag_offset = frag_offset - iphdr_len; // Offset into the data that we want to fragment
+                                                    // round this up to the next (or current) 8-byte boundary
+    data_frag_offset += (8 - (data_frag_offset % 8));
+    if (data_frag_offset >= data_len) {
+        return -1;
+    }
+
+    struct iphdr *frag1, *frag2, *frag3;
+    int frag1_len = iphdr_len + data_frag_offset;
+    int frag2_len = len - data_frag_offset;
+    int frag3_len = frag2_len;
+
+    frag1 = malloc(frag1_len);
+    frag2 = malloc(frag2_len);
+    frag3 = malloc(frag3_len);
+
+    // Fragment 1
+    memcpy(frag1, ip, iphdr_len);
+    frag1->frag_off = htons(IP_MF);
+    frag1->tot_len = htons(frag1_len);
+    unsigned char *frag1_data = &((unsigned char *)frag1)[iphdr_len];
+    memcpy(frag1_data, data, data_frag_offset);
+    ip_checksum(frag1);
+
+    // Fragment 2
+    memcpy(frag2, ip, iphdr_len);
+    frag2->frag_off = htons(data_frag_offset/8);
+    frag2->tot_len = htons(frag2_len);
+    unsigned char *frag2_data = &((unsigned char *)frag2)[iphdr_len];
+    memcpy(frag2_data, &data[data_frag_offset], data_len - data_frag_offset);
+    ip_checksum(frag2);
+
+    // Fragment 3 (copy of frag2, with lower TTL and different data)
+    memcpy(frag3, frag2, iphdr_len);
+    frag3->ttl = conf->ttl;
+    unsigned char *frag3_data = &((unsigned char *)frag3)[iphdr_len];
+    memset(frag3_data, conf->replace, data_len - data_frag_offset);
+    ip_checksum(frag3);
+
+    struct sockaddr_in sin;
+    sin.sin_family = AF_INET;
+    sin.sin_port = 0;   //???
+
+    // Send 1, 3, 2
+    sin.sin_addr.s_addr = frag1->daddr;
+    sendto(conf->rawsock, frag1, frag1_len, 0, (struct sockaddr*)&sin, sizeof(sin));
+
+    sin.sin_addr.s_addr = frag3->daddr;
+    sendto(conf->rawsock, frag3, frag3_len, 0, (struct sockaddr*)&sin, sizeof(sin));
+
+    sin.sin_addr.s_addr = frag2->daddr;
+    sendto(conf->rawsock, frag2, frag2_len, 0, (struct sockaddr*)&sin, sizeof(sin));
+
+    free(frag1);
+    free(frag2);
+    free(frag3);
+}
 
 int pkt_cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
               struct nfq_data *nfa, void *data)
@@ -44,6 +134,7 @@ int pkt_cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     unsigned char *found;
     found = (unsigned char *)memmem(payload, len, conf->filter_keyword, conf->filter_keyword_len);
     if (found != NULL) {
+        fragment_packet((struct iphdr *)payload, (found - payload), len, conf);
         return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
     }
 
@@ -102,6 +193,12 @@ int main(int argc, char *argv[])
             default:
                 print_help();
         }
+    }
+
+    conf.rawsock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (conf.rawsock < 0) {
+        perror("socket");
+        return -1;
     }
 
     buf = malloc(BUFSIZE);
