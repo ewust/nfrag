@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <linux/netfilter.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
+#include <getopt.h>
 
 #define BUFSIZE 9000
 
@@ -16,6 +17,7 @@ struct config {
     uint32_t        filter_keyword_len;
 
     unsigned char   replace;
+    int             ttl;
 };
 
 int pkt_cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
@@ -48,6 +50,22 @@ int pkt_cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 }
 
+void print_help()
+{
+    printf("nfrag: Fragment IPv4 packets on keyword. When a keyword is detected\n");
+    printf("in a packet, create two fragments from it (1 and 2), and send three\n");
+    printf("fragments: fragment 1, fragment 3, and fragment 2, where fragment 3\n");
+    printf("is a \"disrupt\" fragment, made from a copy of fragment 2 with a\n");
+    printf("lower TTL and replaced data\n");
+    printf("\n");
+    printf("Options:\n");
+    printf("    --keyword, -k   string keyword to fragment packets\n");
+    printf("    --replace, -r   character to send in the disrupt fragment\n");
+    printf("    --ttl, -t       TTL of fragment 3\n");
+    printf("\n");
+    exit(1);
+}
+
 
 int main(int argc, char *argv[])
 {
@@ -58,13 +76,33 @@ int main(int argc, char *argv[])
     struct nfq_handle *nfqh;
     struct nfq_q_handle *qh;
     struct config conf;
+    int c;
+    int option_index = 0;
+    struct option long_options[] = {
+        {"keyword", required_argument, 0, 0},
+        {"replace", required_argument, 0, 0},
+        {"ttl",     required_argument, 0, 0},
+        {0, 0, 0, 0}};
 
-    conf.filter_keyword = "twitter";
-    if (argc > 1) {
-        conf.filter_keyword = argv[1];
+
+    while ((c = getopt_long(argc, argv, "k:r:t:", long_options, &option_index)) != -1) {
+
+        switch (c) {
+            case 'k':
+                conf.filter_keyword = optarg;
+                conf.filter_keyword_len = strlen(conf.filter_keyword);
+                break;
+            case 'r':
+                conf.replace = optarg[0];
+                break;
+            case 't':
+                conf.ttl = atoi(optarg);
+                break;
+            case '?':
+            default:
+                print_help();
+        }
     }
-    conf.filter_keyword_len = strlen(conf.filter_keyword);
-    conf.replace = 'X';
 
     buf = malloc(BUFSIZE);
     if (!buf) {
