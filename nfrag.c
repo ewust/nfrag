@@ -1,5 +1,8 @@
 #include <stdlib.h>
 #include <stdio.h>
+
+
+#define __USE_GNU
 #include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -8,18 +11,40 @@
 
 #define BUFSIZE 9000
 
+struct config {
+    unsigned char   *filter_keyword;  // Keyword to filter on
+    uint32_t        filter_keyword_len;
+
+    unsigned char   replace;
+};
 
 int pkt_cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
               struct nfq_data *nfa, void *data)
 {
     uint32_t id = 0;
     struct nfqnl_msg_packet_hdr *ph;
+    unsigned char *payload;
+    int len;
+    struct config *conf = data;
 
     ph = nfq_get_msg_packet_hdr(nfa);
     if (ph) {
         id = ntohl(ph->packet_id);
         printf("id %d\n", id);
     }
+
+    len = nfq_get_payload(nfa, &payload);
+    if (len < 0) {
+        fprintf(stderr, "Error nfq_get_payload %d\n", len);
+        exit(1);
+    }
+
+    unsigned char *found;
+    found = (unsigned char *)memmem(payload, len, conf->filter_keyword, conf->filter_keyword_len);
+    if (found != NULL) {
+        return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
+    }
+
     return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 }
 
@@ -32,6 +57,14 @@ int main(int argc, char *argv[])
     unsigned char *buf;
     struct nfq_handle *nfqh;
     struct nfq_q_handle *qh;
+    struct config conf;
+
+    conf.filter_keyword = "twitter";
+    if (argc > 1) {
+        conf.filter_keyword = argv[1];
+    }
+    conf.filter_keyword_len = strlen(conf.filter_keyword);
+    conf.replace = 'X';
 
     buf = malloc(BUFSIZE);
     if (!buf) {
@@ -58,7 +91,7 @@ int main(int argc, char *argv[])
     }
     printf("got nfq_bind: %d\n", status);
 
-    qh = nfq_create_queue(nfqh, 0, &pkt_cb, NULL);
+    qh = nfq_create_queue(nfqh, 0, &pkt_cb, &conf);
     if (!qh) {
         fprintf(stderr, "Error: nfq_create_queue\n");
         return -1;
