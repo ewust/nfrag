@@ -59,7 +59,6 @@ def make_dns_pkt(domain, txid=None, sport=None, dport=53, srcip=None, dstip=DEFA
 def get_fragments(ip_pkt, num_frags=2, fragment_in=None):
 
     x = str(ip_pkt)
-    hdr = dpkt.ip.IP(src=ip_pkt.src, dst=ip_pkt.dst, p=ip_pkt.p, ttl=ip_pkt.ttl, id=ip_pkt.id, off=dpkt.ip.IP_MF, sum=ip_pkt.sum, len=ip_pkt.len)
 
     data = str(ip_pkt.data)
     data_len = len(data)
@@ -82,7 +81,7 @@ def get_fragments(ip_pkt, num_frags=2, fragment_in=None):
 
 
     for i in xrange(num_frags):
-        cur_pkt = hdr
+        cur_pkt = dpkt.ip.IP(src=ip_pkt.src, dst=ip_pkt.dst, p=ip_pkt.p, ttl=ip_pkt.ttl, id=ip_pkt.id, off=dpkt.ip.IP_MF, sum=ip_pkt.sum, len=ip_pkt.len)
         cur_pkt.sum = 0
         if i != (num_frags - 1):
             cur_pkt.off = dpkt.ip.IP_MF | ((offset/8) & dpkt.ip.IP_OFFMASK)
@@ -95,6 +94,11 @@ def get_fragments(ip_pkt, num_frags=2, fragment_in=None):
 
 
         yield cur_pkt
+
+def copy_ip(ip_pkt):
+    new_pkt = dpkt.ip.IP(src=ip_pkt.src, dst=ip_pkt.dst, p=ip_pkt.p, ttl=ip_pkt.ttl, id=ip_pkt.id, off=ip_pkt.off, sum=ip_pkt.sum, len=ip_pkt.len)
+    new_pkt.data = ip_pkt.data
+    return new_pkt
 
 net = dnet.ip()
 dns = make_dns_pkt("twitter.com", srcip=sys.argv[1])
@@ -119,12 +123,15 @@ def send(pkt):
 
 #send(str(dns))
 
-for pkt in get_fragments(dns, fragment_in='twitter'):
-    print pkt.__repr__()
-    send(str(pkt))
-    #time.sleep(1)
+pkts = list(get_fragments(dns, fragment_in='twitter'))
 
+print pkts
+send(str(pkts[0]))
 
-#net.send(str(dns))
+distract_frag = copy_ip(pkts[1])
 
+distract_frag.data = 'X'*len(pkts[1].data)
+distract_frag.ttl = 3
+send(str(distract_frag))
+send(str(pkts[1]))
 
