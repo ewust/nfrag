@@ -42,6 +42,26 @@ void ip_checksum(struct iphdr *ip)
     ip->check = htons(csum((uint16_t *)ip, ip->ihl*2, 0));
 }
 
+void print_data(unsigned char *data, size_t len)
+{
+    int i;
+    for (i=0; i<len; i++) {
+        if (data[i] >= 32 && data[i] < 127) {
+            printf("%c", data[i]);
+        } else {
+            printf(".");
+        }
+    }
+    printf("\n");
+}
+
+void print_arrow(int offset)
+{
+    int i;
+    for (i=0; i<offset; i++) printf(" ");
+    printf("^\n");
+}
+
 int fragment_packet(struct iphdr *ip, int frag_offset, int len, struct config *conf)
 {
     int iphdr_len = ip->ihl*4;
@@ -54,10 +74,17 @@ int fragment_packet(struct iphdr *ip, int frag_offset, int len, struct config *c
 
     int data_frag_offset = frag_offset - iphdr_len; // Offset into the data that we want to fragment
                                                     // round this up to the next (or current) 8-byte boundary
+
+    print_data(data, data_len);
+    print_arrow(data_frag_offset);
+
     data_frag_offset += (8 - (data_frag_offset % 8));
     if (data_frag_offset >= data_len) {
+        printf("Error: %d >= %d, off end of packet\n", data_frag_offset, data_len);
         return -1;
     }
+
+    print_arrow(data_frag_offset);
 
     struct iphdr *frag1, *frag2, *frag3;
     int frag1_len = iphdr_len + data_frag_offset;
@@ -76,6 +103,9 @@ int fragment_packet(struct iphdr *ip, int frag_offset, int len, struct config *c
     memcpy(frag1_data, data, data_frag_offset);
     ip_checksum(frag1);
 
+    printf("frag1: ");
+    print_data(frag1_data, data_frag_offset);
+
     // Fragment 2
     memcpy(frag2, ip, iphdr_len);
     frag2->frag_off = htons(data_frag_offset/8);
@@ -84,12 +114,18 @@ int fragment_packet(struct iphdr *ip, int frag_offset, int len, struct config *c
     memcpy(frag2_data, &data[data_frag_offset], data_len - data_frag_offset);
     ip_checksum(frag2);
 
+    printf("frag2: ");
+    print_data(frag2_data, data_len - data_frag_offset);
+
     // Fragment 3 (copy of frag2, with lower TTL and different data)
     memcpy(frag3, frag2, iphdr_len);
     frag3->ttl = conf->ttl;
     unsigned char *frag3_data = &((unsigned char *)frag3)[iphdr_len];
     memset(frag3_data, conf->replace, data_len - data_frag_offset);
     ip_checksum(frag3);
+
+    printf("frag3: ");
+    print_data(frag3_data, data_len - data_frag_offset);
 
     struct sockaddr_in sin;
     sin.sin_family = AF_INET;
@@ -122,7 +158,6 @@ int pkt_cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
     ph = nfq_get_msg_packet_hdr(nfa);
     if (ph) {
         id = ntohl(ph->packet_id);
-        printf("id %d\n", id);
     }
 
     len = nfq_get_payload(nfa, &payload);
@@ -243,7 +278,6 @@ int main(int argc, char *argv[])
     printf("listening to fd %d\n", fd);
 
     while ((rv = recv(fd, buf, BUFSIZE, 0)) && rv >= 0) {
-        printf("pkt\n");
         nfq_handle_packet(nfqh, buf, rv);
     }
     printf("done\n");
